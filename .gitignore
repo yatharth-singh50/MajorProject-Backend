@@ -1,0 +1,12 @@
+.env
+.venv/
+app/__pycache__/
+app/models/__pycache__/
+app/routes/__pycache__/
+app/services/__pycache__/
+app/utils/__pycache__/
+app/websockets/__pycache__/
+app/models/muril_combined/
+app/db/__pycache__/
+app/core/__pycache__/
+app/crud/__pycache__/
