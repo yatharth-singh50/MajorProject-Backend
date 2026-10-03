@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     # --- Startup ---------------------------------------------------------
     try:
         await init_mongo()
-        logger.info("Connected to MongoDB at %s", settings.MONGODB_URI)
+        logger.info("Connected to MongoDB")
     except Exception:  # noqa: BLE001
         logger.exception(
             "Could not connect to MongoDB at %s -- posts/feed endpoints will fail until it's reachable.",
