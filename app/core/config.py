@@ -77,17 +77,47 @@ class Settings(BaseSettings):
     ENABLE_IMAGE_ENCODER: bool = True
     IMAGE_MODEL_NAME: str = "WinKawaks/vit-tiny-patch16-224"
 
+    # --- AI mode / model routing --------------------------------------------
+    # "local"  -- only ever use the local Ollama models; a stage is reported
+    #             "unavailable" rather than silently calling a cloud API.
+    # "hybrid" -- (default) try local first, fall back to Groq/Gemini if
+    #             Ollama isn't reachable or a specific call fails.
+    # "cloud"  -- always use the cloud providers; this is the expected mode
+    #             once deployed somewhere without the dev machine's GPU.
+    AI_MODE: str = "hybrid"
+
+    # --- Ollama (local models) ----------------------------------------------
+    # Only one of these realistically fits in VRAM at a time on a 6-8GB
+    # consumer GPU -- see app/services/ai/ollama_client.py for how calls are
+    # serialized and kept_alive is kept short to free VRAM between stages.
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_CLAIM_MODEL: str = "qwen2.5:3b"  # claim/entity extraction, search query generation
+    OLLAMA_DEEP_MODEL: str = "llama3.1:8b"  # optional deeper reasoning, invoked sparingly
+    OLLAMA_VISION_MODEL: str = "minicpm-v"  # image understanding / OCR
+    OLLAMA_KEEP_ALIVE: str = "30s"
+    OLLAMA_REQUEST_TIMEOUT_SECONDS: float = 60.0
+
+    # --- Groq (cloud fallback: fast reasoning / evidence analysis) -----------
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+
+    # --- Gemini (cloud fallback: vision / OCR / image claim extraction) ------
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
+
     # --- Verdict thresholds -----------------------------------------------
     # A classifier probability below this confidence is surfaced to users as
     # "uncertain" rather than a confident real/fake call.
     UNCERTAIN_CONFIDENCE_THRESHOLD: float = 0.60
 
-    # --- Real-time verification (future stage) -----------------------------
-    # Placeholder toggle for the "supplement local ML with external evidence"
-    # stage described in the model-training repo's docs. Wire a real
-    # search/fact-check API into services/verification_service.py and flip
-    # this on when ready.
-    ENABLE_REALTIME_VERIFICATION: bool = False
+    # --- Real-time verification ---------------------------------------------
+    # Retrieves live web evidence via DuckDuckGo and has a reasoning model
+    # (local qwen2.5:3b, or Groq in the cloud) judge the claim against it --
+    # see app/services/verification_service.py. Set to False to skip this
+    # stage entirely (e.g. a fully offline demo with no network access).
+    ENABLE_REALTIME_VERIFICATION: bool = True
 
     # --- Feed / pagination -------------------------------------------------
     DEFAULT_FEED_LIMIT: int = 20

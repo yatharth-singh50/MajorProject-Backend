@@ -25,9 +25,11 @@ async def analyze(payload: AnalyzeRequest):
     """
 
     raw_image_bytes = None
+    mime_type = None
     if payload.image_base64:
         decoded = decode_and_validate_image(payload.image_base64, payload.image_mime_type)
         raw_image_bytes = decoded.raw_bytes
+        mime_type = decoded.mime_type
 
-    result = await run_full_pipeline(payload.text, raw_image_bytes)
+    result = await run_full_pipeline(payload.text, raw_image_bytes, mime_type)
     return AnalyzeResponse(**result)

@@ -31,9 +31,9 @@ async def register(payload: RegisterRequest, session: AsyncSession = Depends(get
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, session: AsyncSession = Depends(get_session_dep)):
-    user = await users_crud.authenticate_user(session, payload.username, payload.password)
+    user = await users_crud.authenticate_user(session, payload.identifier, payload.password)
     if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect username/email or password")
     token = create_access_token(subject=user.username)
 
     from app.crud.posts import trust_score_for  # local import avoids a circular import at module load

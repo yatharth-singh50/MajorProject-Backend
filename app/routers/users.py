@@ -10,6 +10,7 @@ from app.db.mongodb import get_db
 from app.db.postgres import get_session_dep
 from app.models.schemas import PostOut, UserOut, UserUpdate
 from app.models.sql_models import User
+from app.utils.media import decode_and_validate_image
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -33,6 +34,21 @@ async def patch_user(
     if current_user.username != username:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="You can only edit your own profile")
 
+    # Profile photo / banner: client sends a data: URI (already cropped/
+    # resized client-side). Re-validated and re-normalized here exactly like
+    # post images (utils/media.py), then stored as a clean data: URI so the
+    # frontend can drop it straight into an <img src="..."> with no further
+    # processing. Uses MAX_IMAGE_SIZE_BYTES, same limit as post images.
+    avatar_image_value = None
+    if patch.avatar_image is not None:
+        decoded = decode_and_validate_image(patch.avatar_image, None)
+        avatar_image_value = f"data:{decoded.mime_type};base64,{decoded.base64_str}"
+
+    banner_image_value = None
+    if patch.banner_image is not None:
+        decoded = decode_and_validate_image(patch.banner_image, None)
+        banner_image_value = f"data:{decoded.mime_type};base64,{decoded.base64_str}"
+
     updated = await users_crud.update_user(
         session,
         current_user,
@@ -41,6 +57,8 @@ async def patch_user(
             "bio": patch.bio,
             "location": patch.location,
             "avatar_color": patch.avatar_color,
+            "avatar_image": avatar_image_value,
+            "banner_image": banner_image_value,
             "languages": patch.languages,
             "auto_analyze": patch.auto_analyze,
             "disputed_threshold": patch.disputed_threshold,

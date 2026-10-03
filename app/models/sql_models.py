@@ -35,6 +35,25 @@ class User(Base):
     location: Mapped[str] = mapped_column(String(120), default="", server_default="")
     avatar_color: Mapped[str] = mapped_column(String(16), default="#D97757", server_default="#D97757")
 
+    # Optional profile images, stored as data: URIs (base64) -- same
+    # "images as byte code" approach used for post media. Nullable: a user
+    # with neither still falls back to the initials/avatar_color circle and
+    # a plain gradient banner on the frontend.
+    # NOTE: typed as `Mapped[str]`, not `Mapped[Optional[str]]`, on purpose --
+    # SQLAlchemy 2.0's annotation resolution for Optional/Union-typed mapped
+    # columns is broken under Python 3.14 (a CPython 3.14 typing.Union change
+    # breaks SQLAlchemy's de_stringify_union_elements/make_union_type: "descriptor
+    # '__getitem__' requires a 'typing.Union' object but received a 'tuple'").
+    # `nullable=True` below is what actually makes the DB column nullable --
+    # the Python type hint is just slightly imprecise as a tradeoff to avoid
+    # that crash. Safe to switch back to Mapped[Optional[str]] once you're on
+    # a SQLAlchemy version with a confirmed fix for this (2.0.41 began Python
+    # 3.14 support, but 2.0.37 is still confirmed broken -- check the 2.0.x
+    # changelog for the specific de_stringify/annotation fix before assuming
+    # any particular later version is safe, then test before reverting this).
+    avatar_image: Mapped[str] = mapped_column(Text, nullable=True, default=None)
+    banner_image: Mapped[str] = mapped_column(Text, nullable=True, default=None)
+
     # ISO 639-1 codes, e.g. ["en", "hi"] -- matches the frontend's mockData shape.
     languages: Mapped[list] = mapped_column(ARRAY(String(8)), default=list)
 
@@ -60,6 +79,8 @@ class User(Base):
             "bio": self.bio,
             "location": self.location,
             "avatarColor": self.avatar_color,
+            "avatarImage": self.avatar_image,
+            "bannerImage": self.banner_image,
             "joinedAt": self.created_at.isoformat() if self.created_at else None,
             "platformVerified": self.platform_verified,
             "languages": self.languages or [],

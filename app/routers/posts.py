@@ -24,13 +24,15 @@ settings = get_settings()
 router = APIRouter(tags=["posts"])
 
 
-async def _run_pipeline_and_persist(post_id: str, content: str, raw_image_bytes: Optional[bytes]) -> None:
+async def _run_pipeline_and_persist(
+    post_id: str, content: str, raw_image_bytes: Optional[bytes], image_mime_type: Optional[str] = None
+) -> None:
     """Runs in the background so `POST /posts` returns immediately with a
     'processing' post, matching the frontend's optimistic-then-analyzed flow."""
 
     mongo_db = get_db()
     try:
-        result = await run_full_pipeline(content, raw_image_bytes)
+        result = await run_full_pipeline(content, raw_image_bytes, image_mime_type)
         updated_doc = await posts_crud.apply_analysis_result(mongo_db, post_id, result)
     except Exception:  # noqa: BLE001
         logger.exception("ML pipeline failed for post %s", post_id)
@@ -108,9 +110,27 @@ async def create_post(
             post_id=payload.parentId,
         )
 
-    background_tasks.add_task(_run_pipeline_and_persist, doc["_id"], payload.content, raw_image_bytes)
+    background_tasks.add_task(
+        _run_pipeline_and_persist, doc["_id"], payload.content, raw_image_bytes, media["mimeType"] if media else None
+    )
 
     return hydrated
+
+
+@router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_post(
+    post_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    mongo_db = get_db()
+    doc = await posts_crud.get_post_doc(mongo_db, post_id)
+    if doc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Post not found")
+    if doc["authorId"] != current_user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="You can only delete your own posts")
+
+    deleted_ids = await posts_crud.delete_post_cascade(mongo_db, post_id)
+    await manager.broadcast_post_deleted(deleted_ids)
 
 
 @router.get("/posts/{post_id}", response_model=PostOut)

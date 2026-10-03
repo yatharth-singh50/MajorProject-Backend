@@ -35,6 +35,11 @@ def _default_analysis(model_label: str) -> dict:
         "explanation": "",
         "matchedClaims": [],
         "pipeline": [],
+        "extractedClaim": None,
+        "imageUnderstanding": None,
+        "verificationStatus": "unavailable",
+        "aiMode": None,
+        "overallAssessment": None,
     }
 
 
@@ -80,6 +85,11 @@ async def apply_analysis_result(mongo_db, post_id: str, result: dict) -> Optiona
         "explanation": result["explanation"],
         "matchedClaims": result["matchedClaims"],
         "pipeline": result["pipeline"],
+        "extractedClaim": result.get("extractedClaim"),
+        "imageUnderstanding": result.get("imageUnderstanding"),
+        "verificationStatus": result.get("verificationStatus", "unavailable"),
+        "aiMode": result.get("aiMode"),
+        "overallAssessment": result.get("overallAssessment"),
     }
     await mongo_db.posts.update_one(
         {"_id": post_id},
@@ -93,6 +103,25 @@ async def mark_analysis_failed(mongo_db, post_id: str, reason: str) -> None:
         {"_id": post_id},
         {"$set": {"analysis.status": "failed", "analysis.explanation": reason}},
     )
+
+
+async def delete_post_cascade(mongo_db, post_id: str) -> list[str]:
+    """Deletes a post and every reply descending from it (replies to
+    replies included), so deleting a post never leaves orphaned children
+    dangling with a parentId that no longer resolves. Returns every id
+    actually deleted, root first, so the caller can broadcast all of them
+    (e.g. so another open tab removes them from a feed it's showing)."""
+
+    to_delete = [post_id]
+    frontier = [post_id]
+    while frontier:
+        cursor = mongo_db.posts.find({"parentId": {"$in": frontier}}, {"_id": 1})
+        children = [doc["_id"] async for doc in cursor]
+        to_delete.extend(children)
+        frontier = children
+
+    await mongo_db.posts.delete_many({"_id": {"$in": to_delete}})
+    return to_delete
 
 
 async def toggle_like(mongo_db, post_id: str, user_id: str) -> Optional[dict]:

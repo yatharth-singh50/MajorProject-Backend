@@ -1,49 +1,93 @@
 """
-Stage 4 (future) of the analysis pipeline: real-time verification.
+Stage of the analysis pipeline: real-time verification.
 
-Per the model-training repo's docs, this is a "planned backend component"
-meant to supplement the local classifier with current external evidence
-(news search, fact-check databases, etc.), producing states like VERIFIED /
-SUPPORTED / DISPUTED / UNSUPPORTED / NEEDS_CONTEXT / UNVERIFIED.
+Retrieves live web evidence via DuckDuckGo (app.services.ai.search_tool --
+no API key needed, same tool regardless of AI_MODE) and asks a reasoning
+model (local qwen2.5:3b, or Groq in the cloud -- app.services.ai.router) to
+judge, using ONLY that retrieved evidence, whether the claim is supported,
+contradicted, mixed, or there's insufficient evidence either way.
 
-Nothing here calls an external API yet -- that's a deliberate scope
-decision for this stage of the backend (no API keys / evidence sources have
-been chosen). This module exists so the pipeline has a clean seam to grow
-into: implement `fetch_evidence()` against whatever search/fact-check API
-you choose, keep the return shape (a list of MatchedClaim-shaped dicts), and
-flip `ENABLE_REALTIME_VERIFICATION` on in config.
+This is a genuinely SEPARATE signal from the MuRIL text classifier's
+verdict (see ml_pipeline.py and AnalysisOut in app/models/schemas.py). A
+claim can get a confident MuRIL "real" prediction -- a style/pattern
+judgment about how the text is written -- while this stage independently
+finds the opposite from live evidence (e.g. an RBI/PIB denial of a
+recurring "notes are being discontinued" hoax), or vice versa. Never let
+one override or silently stand in for the other.
 
-Important (per MODEL_DOCUMENTATION.txt): the ML prediction and factual
-verification are separate signals. A claim should not be called false
-merely because the classifier predicts FAKE, or because this stage finds no
-supporting evidence -- callers should treat an empty/disabled result here as
-"no external evidence gathered", not as confirmation either way.
+Controlled by ENABLE_REALTIME_VERIFICATION (default True). Set to False to
+skip this stage entirely (e.g. a fully offline demo), in which case
+verificationStatus stays "unavailable".
 """
 
-from typing import List
+import logging
 
-from app.core.config import get_settings
+from app.services.ai import router as ai_router
+from app.services.ai import search_tool
 
-settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
-async def fetch_evidence(text: str, language_code: str) -> List[dict]:
-    """Returns a list of {"title", "source", "stance"} dicts.
-
-    Currently a no-op stub (returns []) unless/until a real evidence source
-    is wired in. Kept `async` since any real implementation will be an
-    outbound network call.
+async def run_verification(claim_text: str, search_query: str) -> dict:
+    """Returns:
+        {
+            "verificationStatus": "supported" | "contradicted" | "mixed" | "insufficient",
+            "matchedClaims": [{"title", "source", "stance"}, ...],
+            "searchDetail": str,   # for the pipeline's "evidence_retrieval" stage
+            "analysisDetail": str, # for the pipeline's "verification" stage
+        }
     """
 
-    if not settings.ENABLE_REALTIME_VERIFICATION:
-        return []
+    search_results = await search_tool.web_search(search_query)
+    search_detail = (
+        f'{len(search_results)} result(s) found via DuckDuckGo for "{search_query}"'
+        if search_results
+        else f'No results found via DuckDuckGo for "{search_query}"'
+    )
 
-    # --- Extension point -------------------------------------------------
-    # Example shape for a real implementation:
-    #
-    #   results = await some_fact_check_client.search(text, lang=language_code)
-    #   return [
-    #       {"title": r.title, "source": r.source_domain, "stance": r.stance}
-    #       for r in results
-    #   ]
-    return []
+    if not search_results:
+        return {
+            "verificationStatus": "insufficient",
+            "matchedClaims": [],
+            "summary": None,
+            "searchDetail": search_detail,
+            "analysisDetail": "No evidence found to analyze",
+        }
+
+    analysis = await ai_router.run_evidence_analysis(claim_text, search_results)
+
+    if not analysis.available or not analysis.data:
+        # Evidence was found, but nothing could interpret it (local and
+        # cloud both unavailable). Report "insufficient" rather than
+        # guessing at a status -- never silently claim supported/contradicted
+        # without a model actually having judged the evidence.
+        return {
+            "verificationStatus": "insufficient",
+            "matchedClaims": [],
+            "summary": None,
+            "searchDetail": search_detail,
+            "analysisDetail": f"Evidence gathered but not analyzed — {analysis.note}",
+        }
+
+    status = analysis.data.get("verificationStatus", "insufficient")
+    if status not in ("supported", "contradicted", "mixed", "insufficient"):
+        status = "insufficient"
+    summary = analysis.data.get("summary") or None
+
+    matched_claims = []
+    for citation in analysis.data.get("citations") or []:
+        if not isinstance(citation, dict):
+            continue
+        idx = citation.get("index")
+        stance = citation.get("stance")
+        if isinstance(idx, int) and 1 <= idx <= len(search_results) and stance in ("supports", "contradicts"):
+            result = search_results[idx - 1]
+            matched_claims.append({"title": result["title"], "source": result["source"], "stance": stance})
+
+    return {
+        "verificationStatus": status,
+        "matchedClaims": matched_claims,
+        "summary": summary,
+        "searchDetail": search_detail,
+        "analysisDetail": f"Analyzed via {analysis.provider} ({analysis.mode} mode) — {status}",
+    }

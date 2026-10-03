@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.hashing import hash_password, verify_password
@@ -53,8 +53,18 @@ async def create_user(
     return user
 
 
-async def authenticate_user(session: AsyncSession, username: str, password: str) -> Optional[User]:
-    user = await get_user_by_username(session, username)
+async def get_user_by_identifier(session: AsyncSession, identifier: str) -> Optional[User]:
+    """Looks up a user by username OR email -- used at sign-in, where the
+    person may type either. Registration still checks the two separately
+    (get_user_by_username / get_user_by_email) since both must be unique."""
+    result = await session.execute(
+        select(User).where(or_(User.username == identifier, User.email == identifier))
+    )
+    return result.scalar_one_or_none()
+
+
+async def authenticate_user(session: AsyncSession, identifier: str, password: str) -> Optional[User]:
+    user = await get_user_by_identifier(session, identifier)
     if user is None or not verify_password(password, user.hashed_password):
         return None
     return user

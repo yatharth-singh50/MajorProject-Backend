@@ -55,5 +55,8 @@ class ConnectionManager:
     async def broadcast_post_updated(self, post: dict) -> None:
         await self.broadcast({"type": "post_updated", "post": post})
 
+    async def broadcast_post_deleted(self, post_ids: list[str]) -> None:
+        await self.broadcast({"type": "post_deleted", "ids": post_ids})
+
 
 manager = ConnectionManager()

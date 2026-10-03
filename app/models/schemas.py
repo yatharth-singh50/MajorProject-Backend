@@ -26,7 +26,7 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
+    identifier: str = Field(min_length=1, description="Username or email")
     password: str
 
 
@@ -47,6 +47,8 @@ class UserOut(BaseModel):
     bio: str = ""
     location: str = ""
     avatarColor: str = "#D97757"
+    avatarImage: Optional[str] = None  # data: URI, or null to fall back to the initials circle
+    bannerImage: Optional[str] = None  # data: URI, or null to fall back to the gradient banner
     joinedAt: Optional[str] = None
     platformVerified: bool = False
     languages: List[str] = []
@@ -64,6 +66,10 @@ class UserUpdate(BaseModel):
     bio: Optional[str] = None
     location: Optional[str] = None
     avatar_color: Optional[str] = Field(default=None, alias="avatarColor")
+    # Raw data: URI strings -- validated/size-checked in routers/users.py via
+    # utils/media.py, same as post images, rather than in this schema.
+    avatar_image: Optional[str] = Field(default=None, alias="avatarImage")
+    banner_image: Optional[str] = Field(default=None, alias="bannerImage")
     languages: Optional[List[str]] = None
     auto_analyze: Optional[bool] = Field(default=None, alias="autoAnalyze")
     disputed_threshold: Optional[int] = Field(default=None, alias="disputedThreshold", ge=0, le=100)
@@ -105,7 +111,59 @@ class PipelineStage(BaseModel):
     detail: str = ""
 
 
+class VerificationStatus(str, Enum):
+    """Factual verification outcome -- deliberately a SEPARATE signal from
+    `Verdict` above. `Verdict` is what the MuRIL text classifier predicts;
+    this is what (if any) real-time evidence retrieval concluded. The
+    frontend must not collapse these into one "verified real" stamp -- see
+    AI ARCHITECTURE section 10 of the project spec."""
+
+    supported = "supported"
+    contradicted = "contradicted"
+    mixed = "mixed"
+    insufficient = "insufficient"
+    unavailable = "unavailable"  # no evidence stage ran (disabled, or provider unreachable)
+
+
+class ExtractedClaim(BaseModel):
+    """Output of the claim-extraction stage (qwen2.5:3b locally, Groq in the
+    cloud) -- the specific checkable claim pulled out of the post, plus a
+    suggested search query for the (future) evidence-retrieval stage."""
+
+    claim: Optional[str] = None
+    entities: List[str] = []
+    searchQuery: Optional[str] = None
+    provider: str = "none"  # "ollama" | "groq" | "none"
+
+
+class ImageUnderstanding(BaseModel):
+    """Output of the image-understanding stage (MiniCPM-V locally, Gemini in
+    the cloud) -- OCR'd text and any claim the image appears to make. This
+    is NOT a real/fake verdict on the image -- see image_encoder.py."""
+
+    ocrText: Optional[str] = None
+    claim: Optional[str] = None
+    provider: str = "none"  # "ollama" | "gemini" | "none"
+
+
+class OverallAssessment(BaseModel):
+    """A DERIVED, third signal -- computed by combining the model
+    classification and factual verification below with explicit precedence
+    rules (see ml_pipeline.py::_compute_overall_assessment), not by letting
+    either one silently overwrite the other. When live evidence
+    contradicts/supports a claim, it dominates this field regardless of how
+    confident the text classifier was, because it's checked against
+    current reality rather than being a style/pattern judgment. When no
+    evidence was gathered (or it was inconclusive), this just mirrors the
+    model classification, capped at a lower confidence since it's unverified."""
+
+    label: Verdict
+    confidence: float
+    reason: str
+
+
 class AnalysisOut(BaseModel):
+    # --- Preserved for frontend compatibility -------------------------------
     status: AnalysisStatus
     verdict: Optional[Verdict] = None
     confidence: Optional[float] = None
@@ -113,6 +171,15 @@ class AnalysisOut(BaseModel):
     explanation: str = ""
     matchedClaims: List[MatchedClaim] = []
     pipeline: List[PipelineStage] = []
+
+    # --- Extended: model classification vs. factual verification, kept
+    # explicitly separate per the project spec. Do not infer one from the
+    # other in the UI. ---------------------------------------------------
+    extractedClaim: Optional[ExtractedClaim] = None
+    imageUnderstanding: Optional[ImageUnderstanding] = None
+    verificationStatus: VerificationStatus = VerificationStatus.unavailable
+    aiMode: Optional[str] = None  # "local" | "hybrid" | "cloud" -- which mode produced this analysis
+    overallAssessment: Optional[OverallAssessment] = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -134,6 +201,11 @@ class AnalyzeResponse(BaseModel):
     matchedClaims: List[MatchedClaim] = []
     pipeline: List[PipelineStage] = []
     image_analysis: Optional[dict] = None
+    extractedClaim: Optional[ExtractedClaim] = None
+    imageUnderstanding: Optional[ImageUnderstanding] = None
+    verificationStatus: VerificationStatus = VerificationStatus.unavailable
+    aiMode: Optional[str] = None
+    overallAssessment: Optional[OverallAssessment] = None
 
 
 # ---------------------------------------------------------------------------
