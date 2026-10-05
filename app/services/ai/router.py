@@ -88,6 +88,11 @@ _EVIDENCE_ANALYSIS_SYSTEM = (
     "A result about the general topic (e.g. the search for alien life in general) that does NOT confirm "
     "the specific event claimed (e.g. aliens having actually been detected) COUNTS AS CONTRADICTING or "
     "being irrelevant to the claim -- it is not support just because it shares keywords.\n"
+    "- A general reference/encyclopedia-style page about a broad topic (e.g. a Wikipedia overview of "
+    '"extraterrestrial life" or "exoplanets" in general) almost NEVER supports a specific, unconfirmed '
+    "recent event-claim -- by nature it explains background concepts rather than confirming new specific "
+    "events, even when a related search term about a hypothetical/candidate finding appears on it. Only "
+    "mark \"supports\" when a result itself reports that the specific event in the claim occurred.\n"
     '- "contradicted": the clear majority of relevant, credible results refute the claim, or one '
     "authoritative source (official denial, a fact-check labeling it false/hoax/misinformation, "
     "scientific consensus/absence of confirmation) directly refutes it. Do not water this down to "
@@ -100,7 +105,12 @@ _EVIDENCE_ANALYSIS_SYSTEM = (
     "`summary` must be 1-2 plain sentences a reader can act on (e.g. what the evidence actually shows, "
     "and why), written as if explaining the verdict to the person who posted the claim.\n\n"
     "`index` in citations MUST be the 1-based position of a result you actually used from the list "
-    "given -- never invent a source, a number outside the list, or a title/URL not shown to you."
+    "given -- never invent a source, a number outside the list, or a title/URL not shown to you.\n\n"
+    "Worked example of a common mistake to AVOID: claim = \"Government reports confirm aliens found in "
+    "the Andromeda galaxy.\" A result titled \"Extragalactic planet - Wikipedia\" that explains what "
+    "extragalactic planets are in general is NOT support for this claim -- it never says aliens were "
+    "found, let alone by a government. That result is irrelevant/contradicting (it doesn't corroborate "
+    "the specific event), not supporting, no matter how topically adjacent it looks."
 )
 
 
@@ -177,23 +187,11 @@ async def run_deep_reasoning(prompt: str) -> StageResult:
     return StageResult(None, "none", mode.value, False, "No cloud deep-reasoning stage configured yet")
 
 
-async def run_evidence_analysis(claim: str, search_results: list[dict]) -> StageResult:
-    """Reasoning stage that judges verification status from already-
-    retrieved web evidence (see ai.search_tool.web_search -- the search
-    itself isn't gated by AI_MODE, only this reasoning-over-results step
-    is). Local: qwen2.5:3b. Cloud fallback: Groq.
-
-    `search_results` must be the exact list the caller will index into for
-    `matchedClaims` -- this function never invents sources, it only asks a
-    model to judge the ones it's given."""
-
-    mode = current_mode()
-
-    numbered = "\n".join(
-        f"{i + 1}. [{r.get('source', '?')}] {r.get('title', '')} — {r.get('snippet', '')}"
-        for i, r in enumerate(search_results)
-    )
-    user_prompt = f"CLAIM: {claim}\n\nSEARCH RESULTS:\n{numbered}"
+async def _evidence_pass(user_prompt: str, mode: AIMode) -> StageResult:
+    """One attempt at evidence analysis, local-first with cloud fallback --
+    factored out of run_evidence_analysis so the escalation path below can
+    call it a second time against a different (larger) local model without
+    duplicating the local/cloud fallback logic."""
 
     if mode in (AIMode.local, AIMode.hybrid):
         try:
@@ -212,3 +210,60 @@ async def run_evidence_analysis(claim: str, search_results: list[dict]) -> Stage
     except ProviderUnavailable as exc:
         logger.info("Cloud evidence analysis unavailable (%s)", exc)
         return StageResult(None, "none", mode.value, False, str(exc))
+
+
+async def run_evidence_analysis(claim: str, search_results: list[dict]) -> StageResult:
+    """Reasoning stage that judges verification status from already-
+    retrieved web evidence (see ai.search_tool.web_search -- the search
+    itself isn't gated by AI_MODE, only this reasoning-over-results step
+    is). Local: qwen2.5:3b, with escalation to llama3.1:8b (see below).
+    Cloud fallback: Groq.
+
+    `search_results` must be the exact list the caller will index into for
+    `matchedClaims` -- this function never invents sources, it only asks a
+    model to judge the ones it's given.
+
+    Escalation: a 3B model is the weakest link in this whole pipeline for
+    nuanced stance judgment -- it can mislabel a topically-related but
+    non-corroborating source (e.g. a general Wikipedia overview) as
+    "supports" even with explicit prompt instructions against exactly that.
+    A first-pass "mixed" result is precisely the ambiguous case worth a
+    second, more careful opinion before settling -- so when that happens
+    (and we're not in CLOUD-only mode), the same evidence is re-judged by
+    the larger local model (llama3.1:8b) as a tie-breaker. This is the
+    "optional deeper local reasoning, invoked when necessary" case
+    run_deep_reasoning's own docstring describes, applied specifically to
+    verification rather than as a separate caller-invoked stage."""
+
+    mode = current_mode()
+
+    numbered = "\n".join(
+        f"{i + 1}. [{r.get('source', '?')}] {r.get('title', '')} — {r.get('snippet', '')}"
+        for i, r in enumerate(search_results)
+    )
+    user_prompt = f"CLAIM: {claim}\n\nSEARCH RESULTS:\n{numbered}"
+
+    result = await _evidence_pass(user_prompt, mode)
+
+    if (
+        mode in (AIMode.local, AIMode.hybrid)
+        and result.available
+        and result.data
+        and result.data.get("verificationStatus") == "mixed"
+    ):
+        try:
+            logger.info(
+                "First-pass evidence analysis (%s) was 'mixed' -- escalating to %s for a second opinion",
+                settings.OLLAMA_CLAIM_MODEL,
+                settings.OLLAMA_DEEP_MODEL,
+            )
+            deep_data = await ollama_client.generate_json(
+                settings.OLLAMA_DEEP_MODEL, user_prompt, system=_EVIDENCE_ANALYSIS_SYSTEM
+            )
+            return StageResult(
+                deep_data, "ollama", mode.value, True, note=f"escalated {settings.OLLAMA_CLAIM_MODEL} -> {settings.OLLAMA_DEEP_MODEL}"
+            )
+        except ProviderUnavailable as exc:
+            logger.info("Deep-model escalation unavailable (%s) -- keeping first-pass result", exc)
+
+    return result

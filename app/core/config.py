@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     OLLAMA_VISION_MODEL: str = "minicpm-v"  # image understanding / OCR
     OLLAMA_KEEP_ALIVE: str = "30s"
     OLLAMA_REQUEST_TIMEOUT_SECONDS: float = 60.0
+    # Explicitly bounded, rather than left at Ollama's per-model defaults --
+    # mirrors the NovaAI project's own working setup for these same models.
+    # An unconstrained context size is a plausible contributor to crashes on
+    # heavier calls (e.g. minicpm-v with an image, which expands to far more
+    # tokens than the prompt text alone suggests).
+    OLLAMA_NUM_CTX: int = 4096
+    OLLAMA_NUM_PREDICT: int = 512
 
     # --- Groq (cloud fallback: fast reasoning / evidence analysis) -----------
     GROQ_API_KEY: str = ""

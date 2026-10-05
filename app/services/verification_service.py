@@ -39,17 +39,30 @@ def _reconcile_status(model_status: str, matched_claims: list[dict]) -> str:
     per-source stances, so when those stances unanimously agree, they
     override the top-level label rather than the other way around.
 
-    Only reconciles when every cited stance agrees -- any genuine mix of
-    supports/contradicts is left as "mixed" rather than second-guessed, and
-    an empty citation list (nothing confidently cited either way) defers
-    entirely to the model's own call."""
+    Unanimous citations always override the model's label. A genuine MIX is
+    resolved with a deliberate skepticism bias, not a neutral tie-break:
+    this is a misinformation detector, where a false "verified" is worse
+    than being overly cautious, so a contradicting voice is never
+    outweighed by an equal or smaller number of supporting ones --
+    "supported" only survives a mix it wins outright (strictly more
+    supports than contradicts). An empty citation list (nothing confidently
+    cited either way) defers entirely to the model's own call."""
 
-    stances = {c["stance"] for c in matched_claims}
-    if stances == {"contradicts"}:
-        return "contradicted"
-    if stances == {"supports"}:
+    if not matched_claims:
+        return model_status
+
+    supports = sum(1 for c in matched_claims if c["stance"] == "supports")
+    contradicts = sum(1 for c in matched_claims if c["stance"] == "contradicts")
+
+    if contradicts == 0 and supports > 0:
         return "supported"
-    return model_status
+    if supports == 0 and contradicts > 0:
+        return "contradicted"
+    # Genuine mix: contradicts >= supports leans contradicted (skepticism
+    # bias on a tie); only a clear supports majority stays uncorrected.
+    if contradicts >= supports:
+        return "contradicted"
+    return "mixed"
 
 
 async def run_verification(claim_text: str, search_query: str) -> dict:
@@ -106,14 +119,20 @@ async def run_verification(claim_text: str, search_query: str) -> dict:
         stance = citation.get("stance")
         if isinstance(idx, int) and 1 <= idx <= len(search_results) and stance in ("supports", "contradicts"):
             result = search_results[idx - 1]
-            matched_claims.append({"title": result["title"], "source": result["source"], "stance": stance})
+            matched_claims.append(
+                {"title": result["title"], "source": result["source"], "stance": stance, "url": result.get("url")}
+            )
 
     status = _reconcile_status(status, matched_claims)
+
+    analysis_detail = f"Analyzed via {analysis.provider} ({analysis.mode} mode) — {status}"
+    if analysis.note:
+        analysis_detail += f" [{analysis.note}]"
 
     return {
         "verificationStatus": status,
         "matchedClaims": matched_claims,
         "summary": summary,
         "searchDetail": search_detail,
-        "analysisDetail": f"Analyzed via {analysis.provider} ({analysis.mode} mode) — {status}",
+        "analysisDetail": analysis_detail,
     }

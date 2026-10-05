@@ -86,6 +86,12 @@ async def generate(
         "prompt": prompt,
         "stream": False,
         "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+        # Explicit, bounded context/output size rather than per-model
+        # defaults -- see config.py's OLLAMA_NUM_CTX docstring for why.
+        "options": {
+            "num_ctx": settings.OLLAMA_NUM_CTX,
+            "num_predict": settings.OLLAMA_NUM_PREDICT,
+        },
     }
     if system:
         payload["system"] = system
