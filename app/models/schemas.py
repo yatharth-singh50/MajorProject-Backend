@@ -92,6 +92,7 @@ class AnalysisStatus(str, Enum):
     processing = "processing"
     analyzed = "analyzed"
     failed = "failed"
+    skipped = "skipped"  # replies -- the pipeline only ever runs on top-level posts
 
 
 class LanguageOut(BaseModel):
@@ -235,6 +236,12 @@ class PostCreate(BaseModel):
     parentId: Optional[str] = None
     image_base64: Optional[str] = Field(default=None, description="Optional raw base64 image payload")
     image_mime_type: Optional[str] = None
+    # A GIF picked from the frontend's GIF search (Klipy) -- a URL, not an
+    # upload. Deliberately a SEPARATE field from image_base64: GIFs never
+    # produce `raw_image_bytes` for the pipeline, so they never reach MiniCPM-V
+    # /ViT/Gemini. Per the project's own scope: only real images contribute to
+    # fake-news/context analysis, not GIFs (decorative) or other attachments.
+    gif_url: Optional[str] = None
 
 
 class PostOut(BaseModel):

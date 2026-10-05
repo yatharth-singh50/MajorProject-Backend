@@ -28,6 +28,30 @@ from app.services.ai import search_tool
 logger = logging.getLogger(__name__)
 
 
+def _reconcile_status(model_status: str, matched_claims: list[dict]) -> str:
+    """The reasoning model sometimes returns a top-level verificationStatus
+    that's inconsistent with the per-citation stances it ALSO returned in
+    the same response -- e.g. citing two sources and marking both
+    "contradicts", yet still labeling the overall claim "mixed" rather than
+    "contradicted". This happens more with smaller local models (qwen2.5:3b)
+    than larger cloud ones, but either way: a single free-text category
+    label is less reliable than the model's own itemized, structured
+    per-source stances, so when those stances unanimously agree, they
+    override the top-level label rather than the other way around.
+
+    Only reconciles when every cited stance agrees -- any genuine mix of
+    supports/contradicts is left as "mixed" rather than second-guessed, and
+    an empty citation list (nothing confidently cited either way) defers
+    entirely to the model's own call."""
+
+    stances = {c["stance"] for c in matched_claims}
+    if stances == {"contradicts"}:
+        return "contradicted"
+    if stances == {"supports"}:
+        return "supported"
+    return model_status
+
+
 async def run_verification(claim_text: str, search_query: str) -> dict:
     """Returns:
         {
@@ -83,6 +107,8 @@ async def run_verification(claim_text: str, search_query: str) -> dict:
         if isinstance(idx, int) and 1 <= idx <= len(search_results) and stance in ("supports", "contradicts"):
             result = search_results[idx - 1]
             matched_claims.append({"title": result["title"], "source": result["source"], "stance": stance})
+
+    status = _reconcile_status(status, matched_claims)
 
     return {
         "verificationStatus": status,

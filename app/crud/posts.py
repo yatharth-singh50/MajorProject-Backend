@@ -98,6 +98,30 @@ async def apply_analysis_result(mongo_db, post_id: str, result: dict) -> Optiona
     return await mongo_db.posts.find_one({"_id": post_id})
 
 
+async def mark_reply_not_analyzed(mongo_db, post_id: str) -> dict:
+    """Replies don't go through the fact-checking pipeline -- only
+    top-level posts do (see routers/posts.py::create_post). Sets a
+    terminal, non-"processing" analysis state so the UI never shows an
+    indefinite "Analyzing..." spinner on a reply."""
+
+    analysis = {
+        "status": "skipped",
+        "verdict": None,
+        "confidence": None,
+        "model": "N/A — replies aren't analyzed",
+        "explanation": "Replies aren't run through the fact-checking pipeline -- only top-level posts are.",
+        "matchedClaims": [],
+        "pipeline": [],
+        "extractedClaim": None,
+        "imageUnderstanding": None,
+        "verificationStatus": "unavailable",
+        "aiMode": None,
+        "overallAssessment": None,
+    }
+    await mongo_db.posts.update_one({"_id": post_id}, {"$set": {"analysis": analysis}})
+    return await mongo_db.posts.find_one({"_id": post_id})
+
+
 async def mark_analysis_failed(mongo_db, post_id: str, reason: str) -> None:
     await mongo_db.posts.update_one(
         {"_id": post_id},
