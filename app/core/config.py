@@ -112,6 +112,18 @@ class Settings(BaseSettings):
     # "uncertain" rather than a confident real/fake call.
     UNCERTAIN_CONFIDENCE_THRESHOLD: float = 0.60
 
+    # --- GIF search (compose box GIF picker) ---------------------------------
+    # Optional -- the GIF picker just shows "not configured" with no key set.
+    # GIFs picked here are stored as a URL only (PostCreate.gif_url) and
+    # deliberately never reach the vision pipeline -- see gif_search.py.
+    #
+    # Using Klipy, not Tenor: Google fully shut down the public Tenor API on
+    # June 30, 2026 (new key registrations were frozen back in January 2026)
+    # -- see https://support.google.com/tenor/answer/10455265. Klipy is the
+    # commonly-used drop-in replacement with a free tier.
+    # Get a key at https://klipy.com/developers (or https://partner.klipy.com).
+    KLIPY_API_KEY: str = ""
+
     # --- Real-time verification ---------------------------------------------
     # Retrieves live web evidence via DuckDuckGo and has a reasoning model
     # (local qwen2.5:3b, or Groq in the cloud) judge the claim against it --

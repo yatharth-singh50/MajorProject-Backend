@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.db.mongodb import close_mongo, init_mongo
 from app.db.postgres import close_postgres, init_postgres
-from app.routers import analyze, auth, discovery, feed, notifications, posts, users, ws
+from app.routers import analyze, auth, discovery, feed, media, notifications, posts, users, ws
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     # --- Startup ---------------------------------------------------------
     try:
         await init_mongo()
-        logger.info("Connected to MongoDB")
+        logger.info("Connected to MongoDB at %s", settings.MONGODB_URI)
     except Exception:  # noqa: BLE001
         logger.exception(
             "Could not connect to MongoDB at %s -- posts/feed endpoints will fail until it's reachable.",
@@ -77,6 +77,7 @@ app.include_router(feed.router)
 app.include_router(discovery.router)
 app.include_router(analyze.router)
 app.include_router(notifications.router)
+app.include_router(media.router)
 app.include_router(ws.router)
 
 

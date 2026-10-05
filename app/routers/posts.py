@@ -73,12 +73,21 @@ async def create_post(
         if parent is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Parent post not found")
 
+    if payload.image_base64 and payload.gif_url:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Attach either an image or a GIF, not both")
+
     media = None
     raw_image_bytes = None
     if payload.image_base64:
         decoded = decode_and_validate_image(payload.image_base64, payload.image_mime_type)
         raw_image_bytes = decoded.raw_bytes
         media = {"mimeType": decoded.mime_type, "dataBase64": decoded.base64_str, "url": None}
+    elif payload.gif_url:
+        # GIFs are a URL from the frontend's GIF search (e.g. Tenor), not an
+        # upload -- deliberately never populates raw_image_bytes, so a GIF
+        # never reaches the vision pipeline (MiniCPM-V/ViT/Gemini). Only real
+        # uploaded images contribute to fake-news/context analysis.
+        media = {"mimeType": "image/gif", "dataBase64": None, "url": payload.gif_url}
 
     if payload.languageCode:
         language = {"code": payload.languageCode, "name": KNOWN_LANGUAGES.get(payload.languageCode, payload.languageCode)}
@@ -97,6 +106,14 @@ async def create_post(
         model_label=model_label,
     )
 
+    if payload.parentId:
+        # Replies don't go through the fact-checking pipeline -- only
+        # top-level posts do. Mark it terminally "skipped" up front (rather
+        # than broadcasting "processing" and immediately correcting it, or
+        # leaving it "processing" forever) and never schedule the background
+        # pipeline task for it at all.
+        doc = await posts_crud.mark_reply_not_analyzed(mongo_db, doc["_id"])
+
     hydrated = await posts_crud.hydrate_post(session, mongo_db, doc, current_user_id=current_user.id)
     await manager.broadcast_post_created(hydrated)
 
@@ -110,9 +127,10 @@ async def create_post(
             post_id=payload.parentId,
         )
 
-    background_tasks.add_task(
-        _run_pipeline_and_persist, doc["_id"], payload.content, raw_image_bytes, media["mimeType"] if media else None
-    )
+    if not payload.parentId:
+        background_tasks.add_task(
+            _run_pipeline_and_persist, doc["_id"], payload.content, raw_image_bytes, media["mimeType"] if media else None
+        )
 
     return hydrated
 
