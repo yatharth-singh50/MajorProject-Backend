@@ -20,8 +20,7 @@ async def get_user(username: str, session: AsyncSession = Depends(get_session_de
     user = await users_crud.get_user_by_username(session, username)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
-    trust_score = await posts_crud.trust_score_for(get_db(), user.id)
-    return UserOut(**user.to_public_dict(), trustScore=trust_score)
+    return UserOut(**await posts_crud.user_public(get_db(), user))
 
 
 @router.patch("/{username}", response_model=UserOut)
@@ -65,8 +64,7 @@ async def patch_user(
             "default_post_language": patch.default_post_language,
         },
     )
-    trust_score = await posts_crud.trust_score_for(get_db(), updated.id)
-    return UserOut(**updated.to_public_dict(), trustScore=trust_score)
+    return UserOut(**await posts_crud.user_public(get_db(), updated))
 
 
 @router.get("/{username}/posts", response_model=list[PostOut])

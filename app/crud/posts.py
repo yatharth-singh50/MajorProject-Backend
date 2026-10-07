@@ -54,7 +54,8 @@ async def create_post(
     content: str,
     language: dict,
     parent_id: Optional[str],
-    media: Optional[dict],
+    attachments: list[dict],
+    is_news: bool,
     model_label: str,
 ) -> dict:
     doc = {
@@ -64,7 +65,9 @@ async def create_post(
         "language": language,
         "content": content,
         "translation": None,
-        "media": media,
+        "media": None,  # legacy single-media field; new posts use `attachments`
+        "attachments": attachments,
+        "isNews": is_news,
         "createdAt": _now_iso(),
         "stats": {"likes": 0, "reposts": 0, "comments": 0, "views": 1},
         "likedBy": [],
@@ -98,18 +101,18 @@ async def apply_analysis_result(mongo_db, post_id: str, result: dict) -> Optiona
     return await mongo_db.posts.find_one({"_id": post_id})
 
 
-async def mark_reply_not_analyzed(mongo_db, post_id: str) -> dict:
-    """Replies don't go through the fact-checking pipeline -- only
-    top-level posts do (see routers/posts.py::create_post). Sets a
-    terminal, non-"processing" analysis state so the UI never shows an
-    indefinite "Analyzing..." spinner on a reply."""
+async def mark_not_analyzed(mongo_db, post_id: str, *, model: str, explanation: str) -> dict:
+    """Sets a terminal, non-"processing" analysis state for a post that
+    deliberately skips the fact-check pipeline (replies, posts not tagged as
+    news, posts from verified news/government accounts), so the UI never
+    shows an indefinite "Analyzing..." spinner on it."""
 
     analysis = {
         "status": "skipped",
         "verdict": None,
         "confidence": None,
-        "model": "N/A — replies aren't analyzed",
-        "explanation": "Replies aren't run through the fact-checking pipeline -- only top-level posts are.",
+        "model": model,
+        "explanation": explanation,
         "matchedClaims": [],
         "pipeline": [],
         "extractedClaim": None,
@@ -120,6 +123,15 @@ async def mark_reply_not_analyzed(mongo_db, post_id: str) -> dict:
     }
     await mongo_db.posts.update_one({"_id": post_id}, {"$set": {"analysis": analysis}})
     return await mongo_db.posts.find_one({"_id": post_id})
+
+
+async def mark_reply_not_analyzed(mongo_db, post_id: str) -> dict:
+    return await mark_not_analyzed(
+        mongo_db,
+        post_id,
+        model="N/A — replies aren't analyzed",
+        explanation="Replies aren't run through the fact-checking pipeline -- only top-level news posts are.",
+    )
 
 
 async def mark_analysis_failed(mongo_db, post_id: str, reason: str) -> None:
@@ -143,6 +155,14 @@ async def delete_post_cascade(mongo_db, post_id: str) -> list[str]:
         children = [doc["_id"] async for doc in cursor]
         to_delete.extend(children)
         frontier = children
+
+    # Free the uploaded media these posts referenced (images/videos live in
+    # their own collection, so deleting the post alone would orphan them).
+    media_ids: list[str] = []
+    async for doc in mongo_db.posts.find({"_id": {"$in": to_delete}}, {"attachments": 1}):
+        media_ids.extend(a["id"] for a in (doc.get("attachments") or []) if a.get("id"))
+    if media_ids:
+        await mongo_db.media.delete_many({"_id": {"$in": media_ids}})
 
     await mongo_db.posts.delete_many({"_id": {"$in": to_delete}})
     return to_delete
@@ -196,6 +216,36 @@ async def get_feed_docs(mongo_db, limit: int) -> list[dict]:
 async def get_replies_docs(mongo_db, post_id: str) -> list[dict]:
     cursor = mongo_db.posts.find({"parentId": post_id}).sort("createdAt", 1)
     return [doc async for doc in cursor]
+
+
+async def get_thread_docs(mongo_db, post_id: str, max_depth: int = 12) -> tuple[list[dict], list[dict]]:
+    """Returns (ancestors root-first, descendants oldest-first) for a post.
+    Walks up through parentId, and down breadth-first, so a reply-to-a-reply
+    can be shown in the context of the whole conversation."""
+
+    ancestors: list[dict] = []
+    current = await mongo_db.posts.find_one({"_id": post_id})
+    hops = 0
+    while current and current.get("parentId") and hops < max_depth:
+        parent = await mongo_db.posts.find_one({"_id": current["parentId"]})
+        if parent is None:
+            break
+        ancestors.append(parent)
+        current = parent
+        hops += 1
+    ancestors.reverse()
+
+    descendants: list[dict] = []
+    frontier = [post_id]
+    depth = 0
+    while frontier and depth < max_depth:
+        cursor = mongo_db.posts.find({"parentId": {"$in": frontier}})
+        children = [d async for d in cursor]
+        descendants.extend(children)
+        frontier = [c["_id"] for c in children]
+        depth += 1
+    descendants.sort(key=lambda d: d["createdAt"])
+    return ancestors, descendants
 
 
 async def get_user_posts_docs(mongo_db, author_id: str, tab: str) -> list[dict]:
@@ -253,25 +303,77 @@ async def count_replies_for(mongo_db, post_ids: list[str]) -> dict[str, int]:
 # Trust score ("credibility ring")
 # ---------------------------------------------------------------------------
 
-async def trust_score_for(mongo_db, user_id: str) -> Optional[int]:
-    cursor = mongo_db.posts.find({"authorId": user_id, "analysis.status": "analyzed"})
-    real = 0
-    fake = 0
+async def trust_stats_for(mongo_db, user_ids: list[str]) -> dict[str, tuple[Optional[int], int]]:
+    """{user_id: (score 0-100 or None, number of fact-checked posts)} for
+    several users in ONE query.
+
+    The score is built from each fact-checked post's *overall assessment*
+    (live evidence decides) -- not MuRIL's raw verdict, which only reads
+    writing style and is unreliable. Per fact-checked news post:
+        likely real  -> 1.0
+        unverified/disputed (uncertain) -> 0.5
+        likely fake  -> 0.0
+    and the score is the average, as a percentage. Posts that never went
+    through the pipeline (ordinary posts, replies, posts from verified
+    news/government accounts) don't count either way, so someone who
+    never posts news simply has no score yet (None) rather than a made-up
+    one. Posts analyzed before overall assessments existed are skipped."""
+
+    if not user_ids:
+        return {}
+
+    points: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    cursor = mongo_db.posts.find(
+        {"authorId": {"$in": list(user_ids)}, "analysis.status": "analyzed"},
+        {"authorId": 1, "analysis.overallAssessment": 1},
+    )
     async for doc in cursor:
-        verdict = doc.get("analysis", {}).get("verdict")
-        if verdict == "real":
-            real += 1
-        elif verdict == "fake":
-            fake += 1
-    scored = real + fake
-    if scored == 0:
-        return None
-    return round((real / scored) * 100)
+        label = ((doc.get("analysis") or {}).get("overallAssessment") or {}).get("label")
+        weight = {"real": 1.0, "uncertain": 0.5, "fake": 0.0}.get(label)
+        if weight is None:
+            continue
+        uid = doc["authorId"]
+        points[uid] = points.get(uid, 0.0) + weight
+        counts[uid] = counts.get(uid, 0) + 1
+
+    return {
+        uid: ((round(points[uid] / counts[uid] * 100) if counts.get(uid) else None), counts.get(uid, 0))
+        for uid in user_ids
+    }
+
+
+async def trust_score_for(mongo_db, user_id: str) -> Optional[int]:
+    return (await trust_stats_for(mongo_db, [user_id])).get(user_id, (None, 0))[0]
+
+
+async def user_public(mongo_db, user: User) -> dict:
+    """A user's public dict including their credibility score/sample size --
+    the one place every endpoint should build a UserOut payload from."""
+    score, count = (await trust_stats_for(mongo_db, [user.id]))[user.id]
+    return {**user.to_public_dict(), "trustScore": score, "trustCount": count}
 
 
 # ---------------------------------------------------------------------------
 # Hydration: attach author + reply counts + likedByMe/repostedByMe
 # ---------------------------------------------------------------------------
+
+def _attachments_of(doc: dict) -> list[dict]:
+    """The post's attachments, converting the legacy single `media` field
+    (base64 image or GIF URL, from before multi-attachment posts) on the fly
+    so old posts keep rendering."""
+    if doc.get("attachments"):
+        return doc["attachments"]
+    media = doc.get("media")
+    if not media:
+        return []
+    if media.get("dataBase64"):
+        return [{"id": None, "kind": "image", "mimeType": media.get("mimeType", "image/jpeg"),
+                 "url": "", "dataBase64": media["dataBase64"]}]
+    if media.get("url"):
+        return [{"id": None, "kind": "gif", "mimeType": media.get("mimeType", "image/gif"), "url": media["url"]}]
+    return []
+
 
 def _doc_to_out(doc: dict, *, author_out: Optional[dict], reply_count: int, current_user_id: Optional[str]) -> dict:
     liked_by = doc.get("likedBy", [])
@@ -285,6 +387,8 @@ def _doc_to_out(doc: dict, *, author_out: Optional[dict], reply_count: int, curr
         "content": doc["content"],
         "translation": doc.get("translation"),
         "media": doc.get("media"),
+        "attachments": _attachments_of(doc),
+        "isNews": doc.get("isNews", doc["analysis"].get("status") != "skipped"),
         "createdAt": doc["createdAt"],
         "stats": {**doc["stats"], "comments": reply_count},
         "likedByMe": bool(current_user_id and current_user_id in liked_by),
@@ -306,21 +410,15 @@ async def hydrate_posts(
     authors = await users_crud.get_users_by_ids(session, author_ids)
     reply_counts = await count_replies_for(mongo_db, [doc["_id"] for doc in docs])
 
-    async def _trust_scores() -> dict[str, Optional[int]]:
-        # Only compute for authors actually present in this page, and only once each.
-        scores: dict[str, Optional[int]] = {}
-        for uid in author_ids:
-            scores[uid] = await trust_score_for(mongo_db, uid)
-        return scores
-
-    trust_scores = await _trust_scores()
+    trust = await trust_stats_for(mongo_db, author_ids)
 
     out = []
     for doc in docs:
         author = authors.get(doc["authorId"])
         author_out = None
         if author is not None:
-            author_out = {**author.to_public_dict(), "trustScore": trust_scores.get(author.id)}
+            score, count = trust.get(author.id, (None, 0))
+            author_out = {**author.to_public_dict(), "trustScore": score, "trustCount": count}
         out.append(
             _doc_to_out(
                 doc,

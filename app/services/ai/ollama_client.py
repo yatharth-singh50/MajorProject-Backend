@@ -74,10 +74,18 @@ async def generate(
     system: Optional[str] = None,
     json_mode: bool = False,
     images_base64: Optional[list[str]] = None,
+    keep_alive: Optional[object] = None,
+    use_options: bool = True,
 ) -> str:
     """Runs one generation against a local Ollama model and returns the raw
     text response. Serialized against every other local-model call so we
-    never try to hold two models in VRAM at once (see module docstring)."""
+    never try to hold two models in VRAM at once (see module docstring).
+
+    `keep_alive` / `use_options` let a caller deviate from the defaults for
+    one specific call -- see router.py's image-understanding call, which
+    passes keep_alive=0 and use_options=False to match NovaAI's known-working
+    minicpm-v invocation exactly (bare generate call, no JSON mode, no
+    options dict, unloaded immediately after)."""
 
     global _current_loaded_model
 
@@ -85,14 +93,15 @@ async def generate(
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+        "keep_alive": settings.OLLAMA_KEEP_ALIVE if keep_alive is None else keep_alive,
+    }
+    if use_options:
         # Explicit, bounded context/output size rather than per-model
         # defaults -- see config.py's OLLAMA_NUM_CTX docstring for why.
-        "options": {
+        payload["options"] = {
             "num_ctx": settings.OLLAMA_NUM_CTX,
             "num_predict": settings.OLLAMA_NUM_PREDICT,
-        },
-    }
+        }
     if system:
         payload["system"] = system
     if json_mode:
@@ -105,7 +114,11 @@ async def generate(
             logger.info("Switching local model %s -> %s; evicting %s first", _current_loaded_model, model, _current_loaded_model)
             await _evict(_current_loaded_model)
         data = await _post("/api/generate", payload)
-        _current_loaded_model = model
+        # keep_alive=0 means Ollama already unloaded it the instant this
+        # call finished -- don't remember it as "resident", or the next
+        # model switch would issue a pointless (harmless, but wasteful) extra
+        # eviction call against a model that's already gone.
+        _current_loaded_model = None if payload["keep_alive"] == 0 else model
     return data.get("response", "")
 
 

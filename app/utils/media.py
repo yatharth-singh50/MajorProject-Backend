@@ -65,3 +65,39 @@ def decode_and_validate_image(image_base64: str, mime_type: Optional[str]) -> De
         )
 
     return DecodedImage(raw_bytes=raw, mime_type=detected_mime, base64_str=b64_payload)
+
+
+# ---------------------------------------------------------------------------
+# Multi-attachment uploads (images + videos)
+# ---------------------------------------------------------------------------
+
+ALLOWED_VIDEO_MIME_TYPES = ("video/mp4", "video/webm", "video/quicktime")
+
+# ISO-BMFF "ftyp" brands that are still images (HEIC/AVIF), not video.
+_IMAGE_FTYP_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"avif", b"avis"}
+
+
+def sniff_media(data: bytes):
+    """Identify an upload from its actual bytes -- never trust the client's
+    Content-Type, because these files get served back from our own origin
+    with whatever type we store. Returns (kind, mime) or None if it isn't a
+    supported image/video. kind is "image" | "gif" | "video"."""
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image", "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image", "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif", "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image", "image/webp"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "video", "video/webm"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in _IMAGE_FTYP_BRANDS:
+            return None
+        if brand.startswith(b"qt"):
+            return "video", "video/quicktime"
+        return "video", "video/mp4"
+    return None

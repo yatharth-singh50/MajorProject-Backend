@@ -10,7 +10,10 @@ from sqlalchemy import ARRAY, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.config import get_settings
 from app.db.postgres import Base
+
+VALID_TIERS = ("gold", "news", "government", "company")
 
 
 def _uuid() -> str:
@@ -59,6 +62,13 @@ class User(Base):
 
     platform_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
+    # Verification tier granted by an admin: "gold" (verified person, like a
+    # blue tick), "news" (red -- news channel), "government" (green --
+    # official handle), "company" (black/white -- established company).
+    # NULL = unverified. (Typed Mapped[str] rather than Optional on purpose --
+    # see the Python 3.14 note above.)
+    verification_tier: Mapped[str] = mapped_column(String(16), nullable=True, default=None)
+
     follower_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     following_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
@@ -69,6 +79,18 @@ class User(Base):
     default_post_language: Mapped[str] = mapped_column(String(8), default="en", server_default="en")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @property
+    def is_admin(self) -> bool:
+        return (self.username or "").lower() in get_settings().admin_usernames_set
+
+    @property
+    def effective_tier(self):
+        """What the UI shows: admins always display as "admin" (gold tick +
+        Sathi icon); everyone else shows whatever tier an admin granted."""
+        if self.is_admin:
+            return "admin"
+        return self.verification_tier
 
     def to_public_dict(self) -> dict:
         """Shape matching the frontend's `seedUsers` / `getUserByUsername` contract."""
@@ -82,7 +104,9 @@ class User(Base):
             "avatarImage": self.avatar_image,
             "bannerImage": self.banner_image,
             "joinedAt": self.created_at.isoformat() if self.created_at else None,
-            "platformVerified": self.platform_verified,
+            "platformVerified": bool(self.effective_tier) or bool(self.platform_verified),
+            "verificationTier": self.effective_tier,
+            "isAdmin": self.is_admin,
             "languages": self.languages or [],
             "followerCount": self.follower_count,
             "followingCount": self.following_count,

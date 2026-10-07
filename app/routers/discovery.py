@@ -68,7 +68,6 @@ async def search_all(
     users = result.scalars().all()
     user_outs = []
     for user in users:
-        trust_score = await posts_crud.trust_score_for(mongo_db, user.id)
-        user_outs.append(UserOut(**user.to_public_dict(), trustScore=trust_score))
+        user_outs.append(UserOut(**await posts_crud.user_public(mongo_db, user)))
 
     return SearchResponse(posts=posts, users=user_outs)

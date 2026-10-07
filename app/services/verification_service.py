@@ -43,10 +43,12 @@ def _reconcile_status(model_status: str, matched_claims: list[dict]) -> str:
     resolved with a deliberate skepticism bias, not a neutral tie-break:
     this is a misinformation detector, where a false "verified" is worse
     than being overly cautious, so a contradicting voice is never
-    outweighed by an equal or smaller number of supporting ones --
-    "supported" only survives a mix it wins outright (strictly more
-    supports than contradicts). An empty citation list (nothing confidently
-    cited either way) defers entirely to the model's own call."""
+    outweighed by an equal or smaller number of supporting ones. A tie
+    therefore resolves to "contradicted"; a mix the supporters win outright
+    (strictly more supports than contradicts) is reported as "mixed" --
+    never upgraded to "supported", since some credible source disagreed.
+    An empty citation list (nothing confidently cited either way) defers
+    entirely to the model's own call."""
 
     if not matched_claims:
         return model_status

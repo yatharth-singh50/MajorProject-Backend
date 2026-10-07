@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.db.mongodb import close_mongo, init_mongo
 from app.db.postgres import close_postgres, init_postgres
-from app.routers import analyze, auth, discovery, feed, media, notifications, posts, users, ws
+from app.routers import admin, analyze, auth, discovery, feed, files, media, notifications, posts, users, ws
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,6 +78,8 @@ app.include_router(discovery.router)
 app.include_router(analyze.router)
 app.include_router(notifications.router)
 app.include_router(media.router)
+app.include_router(files.router)
+app.include_router(admin.router)
 app.include_router(ws.router)
 
 

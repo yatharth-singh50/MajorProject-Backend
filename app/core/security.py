@@ -28,6 +28,7 @@ settings = get_settings()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
 
 __all__ = [
+    "require_admin",
     "hash_password",
     "verify_password",
     "create_access_token",
@@ -90,3 +91,10 @@ async def get_current_user_optional(
     if username is None:
         return None
     return await users_crud.get_user_by_username(session, username)
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Dependency for admin-only routes (see settings.ADMIN_USERNAMES)."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+    return current_user

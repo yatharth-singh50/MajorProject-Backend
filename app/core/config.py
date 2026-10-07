@@ -52,12 +52,46 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
+    # --- Admins / verification tiers ----------------------------------------
+    # Comma-separated usernames treated as site admins: they get the gold
+    # tick + Sathi icon, can delete anyone's posts, and can grant/revoke the
+    # verification tiers below. (Username-based on purpose for the demo --
+    # swap for a proper role column if this ever needs to be dynamic.)
+    ADMIN_USERNAMES: str = "yatharth"
+
+    # Tiers whose posts skip the fact-check pipeline entirely. A news
+    # channel or an official government handle is the *source* the pipeline
+    # would be checking other people against, so it isn't run through it.
+    BYPASS_PIPELINE_TIERS: str = "news,government"
+
+    @property
+    def admin_usernames_set(self) -> set:
+        return {u.strip().lower() for u in self.ADMIN_USERNAMES.split(",") if u.strip()}
+
+    @property
+    def bypass_pipeline_tiers_set(self) -> set:
+        return {t.strip().lower() for t in self.BYPASS_PIPELINE_TIERS.split(",") if t.strip()}
+
+    # --- Time awareness --------------------------------------------------------
+    # IANA timezone used when telling the models what "now" is (falls back
+    # to UTC if the zone database isn't available, e.g. Windows without the
+    # `tzdata` package).
+    APP_TIMEZONE: str = "Asia/Kolkata"
+
     # --- Media / uploads -----------------------------------------------
     # Images are accepted as base64-encoded byte strings and stored inline
     # on the post document (fine for a prototype / moderate media sizes).
     # For heavier production use, swap `utils/media.py` for a call to
     # object storage (S3, Supabase Storage, etc.) and store a URL instead.
     MAX_IMAGE_SIZE_BYTES: int = 5 * 1024 * 1024  # 5 MB
+    # Videos are stored as raw bytes in their own Mongo document (not
+    # base64 inside the post), so they must stay under Mongo's 16 MB
+    # per-document limit with headroom.
+    MAX_VIDEO_SIZE_BYTES: int = 12 * 1024 * 1024  # 12 MB
+    MAX_ATTACHMENTS: int = 4
+    # Only the first few images are sent to the vision model -- each one is
+    # a full model swap + inference on a 6GB GPU.
+    MAX_ANALYZED_IMAGES: int = 3
     ALLOWED_IMAGE_MIME_TYPES: List[str] = ["image/jpeg", "image/png", "image/webp", "image/gif"]
 
     # --- ML: text classifier (MuRIL) --------------------------------------

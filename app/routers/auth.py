@@ -36,15 +36,13 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_sessi
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect username/email or password")
     token = create_access_token(subject=user.username)
 
-    from app.crud.posts import trust_score_for  # local import avoids a circular import at module load
+    from app.crud.posts import user_public  # local import avoids a circular import at module load
 
-    trust_score = await trust_score_for(get_db(), user.id)
-    return TokenResponse(access_token=token, user=UserOut(**user.to_public_dict(), trustScore=trust_score))
+    return TokenResponse(access_token=token, user=UserOut(**await user_public(get_db(), user)))
 
 
 @router.get("/me", response_model=UserOut)
 async def read_current_user(current_user: User = Depends(get_current_user)):
-    from app.crud.posts import trust_score_for
+    from app.crud.posts import user_public
 
-    trust_score = await trust_score_for(get_db(), current_user.id)
-    return UserOut(**current_user.to_public_dict(), trustScore=trust_score)
+    return UserOut(**await user_public(get_db(), current_user))

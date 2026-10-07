@@ -29,6 +29,7 @@ from typing import Optional
 from app.core.config import get_settings
 from app.services.ai import gemini_client, groq_client, ollama_client
 from app.services.ai.errors import ProviderUnavailable
+from app.services.ai.time_context import now_context, today_label
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -63,20 +64,31 @@ class StageResult:
         self.note = note
 
 
-_CLAIM_EXTRACTION_SYSTEM = (
+_CLAIM_EXTRACTION_BASE = (
     "You are a fact-checking assistant. Given a social media post, extract the core "
     "checkable factual claim, named entities, and a short web search query that would "
     'help verify it. Respond ONLY with JSON: {"claim": str, "entities": [str], "searchQuery": str}. '
     'If the post is an opinion/question with no checkable claim, respond {"claim": null, "entities": [], "searchQuery": null}.'
 )
 
-_IMAGE_UNDERSTANDING_PROMPT = (
+_IMAGE_UNDERSTANDING_PROMPT_LOCAL = (
+    # Plain-text, three-task prompt -- deliberately matches NovaAI's own
+    # working minicpm-v prompt verbatim rather than asking for JSON (see
+    # run_image_understanding's docstring for why).
+    "Task 1: Extract all text visible in this image exactly as written (OCR), if any.\n"
+    "Task 2: If the text is not in English, provide a direct English translation.\n"
+    "Task 3: State what factual claim, if any, the image appears to make."
+)
+
+_IMAGE_UNDERSTANDING_PROMPT_CLOUD = (
+    # Gemini has no equivalent JSON-mode crash risk, so it keeps the
+    # structured-output prompt for a cleanly parsed ocrText/claim split.
     "Look at this image. If it contains a news headline, screenshot, or caption, transcribe the "
     "visible text verbatim (OCR). Then state what factual claim, if any, the image appears to make. "
     'Respond ONLY with JSON: {"ocrText": str | null, "claim": str | null}.'
 )
 
-_EVIDENCE_ANALYSIS_SYSTEM = (
+_EVIDENCE_ANALYSIS_BASE = (
     "You are a careful fact-checking assistant. You will be given a CLAIM and a numbered list of web "
     "search results (source domain, title, and snippet). Using ONLY the information in these results "
     "-- never anything else you may already know -- decide whether the evidence supports, contradicts, "
@@ -122,7 +134,7 @@ async def run_claim_extraction(text: str) -> StageResult:
 
     if mode in (AIMode.local, AIMode.hybrid):
         try:
-            data = await ollama_client.generate_json(settings.OLLAMA_CLAIM_MODEL, text, system=_CLAIM_EXTRACTION_SYSTEM)
+            data = await ollama_client.generate_json(settings.OLLAMA_CLAIM_MODEL, text, system=_claim_system())
             return StageResult(data, "ollama", mode.value, True)
         except ProviderUnavailable as exc:
             logger.info("Local claim extraction unavailable (%s)", exc)
@@ -131,7 +143,7 @@ async def run_claim_extraction(text: str) -> StageResult:
             # hybrid -> fall through to cloud below
 
     try:
-        data = await groq_client.chat_json(_CLAIM_EXTRACTION_SYSTEM, text)
+        data = await groq_client.chat_json(_claim_system(), text)
         return StageResult(data, "groq", mode.value, True)
     except ProviderUnavailable as exc:
         logger.info("Cloud claim extraction unavailable (%s)", exc)
@@ -142,25 +154,41 @@ async def run_image_understanding(image_bytes: bytes, mime_type: str) -> StageRe
     """Image stage: OCR / claim extraction from an image. Local: MiniCPM-V
     via Ollama. Cloud fallback: Gemini.
 
-    NOT the fake-news verdict for the image -- see image_encoder.py's own
-    caveat. This only describes what the image says/shows."""
+    NOT the fake-news verdict for the image -- this only describes what the
+    image says/shows.
+
+    The local call deliberately mirrors the NovaAI project's own
+    minicpm-v invocation exactly (see its agent.py::chat_stream): a bare
+    `generate` call with `images=[...]`, plain-text output (NOT JSON mode),
+    and `keep_alive=0` set on the call itself, not just the pre-eviction.
+    Earlier versions of this function used generate_json (grammar-
+    constrained JSON decoding) with the default keep_alive -- a heavier
+    code path than NovaAI's, and a plausible contributor to a
+    Windows/CUDA crash (0xc0000409) that doesn't occur in NovaAI's own
+    working setup on the same model. Parsing is intentionally simple (the
+    whole response goes into ocrText) rather than asking the model to
+    self-structure its own output."""
 
     mode = current_mode()
 
     if mode in (AIMode.local, AIMode.hybrid):
         try:
             images_b64 = [base64.b64encode(image_bytes).decode()]
-            data = await ollama_client.generate_json(
-                settings.OLLAMA_VISION_MODEL, _IMAGE_UNDERSTANDING_PROMPT, images_base64=images_b64
+            text = await ollama_client.generate(
+                settings.OLLAMA_VISION_MODEL,
+                _IMAGE_UNDERSTANDING_PROMPT_LOCAL,
+                images_base64=images_b64,
+                keep_alive=0,
+                use_options=False,
             )
-            return StageResult(data, "ollama", mode.value, True)
+            return StageResult({"ocrText": text.strip() or None, "claim": None}, "ollama", mode.value, True)
         except ProviderUnavailable as exc:
             logger.info("Local image understanding unavailable (%s)", exc)
             if mode is AIMode.local:
                 return StageResult(None, "none", mode.value, False, str(exc))
 
     try:
-        data = await gemini_client.analyze_image_json(_IMAGE_UNDERSTANDING_PROMPT, image_bytes, mime_type)
+        data = await gemini_client.analyze_image_json(_IMAGE_UNDERSTANDING_PROMPT_CLOUD, image_bytes, mime_type)
         return StageResult(data, "gemini", mode.value, True)
     except ProviderUnavailable as exc:
         logger.info("Cloud image understanding unavailable (%s)", exc)
@@ -196,7 +224,7 @@ async def _evidence_pass(user_prompt: str, mode: AIMode) -> StageResult:
     if mode in (AIMode.local, AIMode.hybrid):
         try:
             data = await ollama_client.generate_json(
-                settings.OLLAMA_CLAIM_MODEL, user_prompt, system=_EVIDENCE_ANALYSIS_SYSTEM
+                settings.OLLAMA_CLAIM_MODEL, user_prompt, system=_evidence_system()
             )
             return StageResult(data, "ollama", mode.value, True)
         except ProviderUnavailable as exc:
@@ -205,7 +233,7 @@ async def _evidence_pass(user_prompt: str, mode: AIMode) -> StageResult:
                 return StageResult(None, "none", mode.value, False, str(exc))
 
     try:
-        data = await groq_client.chat_json(_EVIDENCE_ANALYSIS_SYSTEM, user_prompt)
+        data = await groq_client.chat_json(_evidence_system(), user_prompt)
         return StageResult(data, "groq", mode.value, True)
     except ProviderUnavailable as exc:
         logger.info("Cloud evidence analysis unavailable (%s)", exc)
@@ -238,7 +266,8 @@ async def run_evidence_analysis(claim: str, search_results: list[dict]) -> Stage
     mode = current_mode()
 
     numbered = "\n".join(
-        f"{i + 1}. [{r.get('source', '?')}] {r.get('title', '')} — {r.get('snippet', '')}"
+        f"{i + 1}. [{r.get('source', '?')}{', ' + r['date'] if r.get('date') else ''}] "
+        f"{r.get('title', '')} — {r.get('snippet', '')}"
         for i, r in enumerate(search_results)
     )
     user_prompt = f"CLAIM: {claim}\n\nSEARCH RESULTS:\n{numbered}"
@@ -258,7 +287,7 @@ async def run_evidence_analysis(claim: str, search_results: list[dict]) -> Stage
                 settings.OLLAMA_DEEP_MODEL,
             )
             deep_data = await ollama_client.generate_json(
-                settings.OLLAMA_DEEP_MODEL, user_prompt, system=_EVIDENCE_ANALYSIS_SYSTEM
+                settings.OLLAMA_DEEP_MODEL, user_prompt, system=_evidence_system()
             )
             return StageResult(
                 deep_data, "ollama", mode.value, True, note=f"escalated {settings.OLLAMA_CLAIM_MODEL} -> {settings.OLLAMA_DEEP_MODEL}"
@@ -267,3 +296,21 @@ async def run_evidence_analysis(claim: str, search_results: list[dict]) -> Stage
             logger.info("Deep-model escalation unavailable (%s) -- keeping first-pass result", exc)
 
     return result
+
+
+def _claim_system() -> str:
+    """Claim-extraction prompt, stamped with the current date/time so the
+    model knows what 'recent' means and writes a search query aimed at
+    current coverage (built per call -- a module-level constant would
+    freeze the date at import time)."""
+    return (
+        f"{now_context()}\n\n{_CLAIM_EXTRACTION_BASE}\n"
+        "The searchQuery must be written to surface the MOST RECENT coverage: keep it short and "
+        f"specific, and if the post describes a recent or ongoing event, include the month and year "
+        f"(it is currently {today_label()})."
+    )
+
+
+def _evidence_system() -> str:
+    """Evidence-analysis prompt, stamped with the current date/time."""
+    return f"{now_context()}\n\n{_EVIDENCE_ANALYSIS_BASE}"

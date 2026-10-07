@@ -51,10 +51,15 @@ class UserOut(BaseModel):
     bannerImage: Optional[str] = None  # data: URI, or null to fall back to the gradient banner
     joinedAt: Optional[str] = None
     platformVerified: bool = False
+    # "admin" (gold tick + Sathi icon) | "gold" | "news" (red) | "government"
+    # (green) | "company" (black/white) | null. See sql_models.VALID_TIERS.
+    verificationTier: Optional[str] = None
+    isAdmin: bool = False
     languages: List[str] = []
     followerCount: int = 0
     followingCount: int = 0
-    trustScore: Optional[int] = None  # 0-100 "credibility ring", or null if no analyzed posts yet
+    trustScore: Optional[int] = None  # 0-100 "credibility ring", or null if no fact-checked posts yet
+    trustCount: int = 0  # how many fact-checked posts the score is based on
 
 
 class UserUpdate(BaseModel):
@@ -104,6 +109,7 @@ class MatchedClaim(BaseModel):
     title: str
     source: str
     stance: str  # "supports" | "contradicts"
+    url: Optional[str] = None
 
 
 class PipelineStage(BaseModel):
@@ -223,6 +229,20 @@ class MediaOut(BaseModel):
     url: Optional[str] = None
 
 
+class AttachmentOut(BaseModel):
+    """One piece of media on a post. Uploaded images/videos are stored as raw
+    bytes in Mongo and served from `/media/{id}` (so <img>/<video> can load
+    them with Range support for seeking); GIFs from the GIF picker are just
+    an external URL. `dataBase64` only ever appears on legacy posts created
+    before attachments existed."""
+
+    id: Optional[str] = None
+    kind: str  # "image" | "video" | "gif"
+    mimeType: str
+    url: str = ""
+    dataBase64: Optional[str] = None
+
+
 class StatsOut(BaseModel):
     likes: int = 0
     reposts: int = 0
@@ -242,6 +262,14 @@ class PostCreate(BaseModel):
     # /ViT/Gemini. Per the project's own scope: only real images contribute to
     # fake-news/context analysis, not GIFs (decorative) or other attachments.
     gif_url: Optional[str] = None
+    # New multi-attachment path: ids returned by POST /media/upload, plus any
+    # number of picked GIF URLs (total capped by MAX_ATTACHMENTS).
+    mediaIds: List[str] = []
+    gifUrls: List[str] = []
+    # The "News" tag. Only posts tagged as news (or containing an obvious
+    # news keyword like #breaking / "breaking news") go through the
+    # fact-check pipeline; everything else is treated as an ordinary post.
+    isNews: bool = False
 
 
 class PostOut(BaseModel):
@@ -252,12 +280,27 @@ class PostOut(BaseModel):
     language: LanguageOut
     content: str
     translation: Optional[str] = None
-    media: Optional[MediaOut] = None
+    media: Optional[MediaOut] = None  # legacy single-media field
+    attachments: List[AttachmentOut] = []
+    isNews: bool = False
     createdAt: str
     stats: StatsOut
     likedByMe: bool = False
     repostedByMe: bool = False
     analysis: AnalysisOut
+
+
+class ThreadOut(BaseModel):
+    """A post's conversation context: the chain of posts above it (root
+    first) and every reply beneath it at any depth, oldest first. The
+    client nests replies using each reply's `parentId`."""
+
+    ancestors: List[PostOut]
+    replies: List[PostOut]
+
+
+class VerificationUpdate(BaseModel):
+    tier: Optional[str] = None  # one of sql_models.VALID_TIERS, or null to revoke
 
 
 class FeedResponse(BaseModel):
@@ -289,6 +332,7 @@ class NotificationOut(BaseModel):
     actorId: Optional[str] = None
     actor: Optional[UserOut] = None
     postId: Optional[str] = None
+    snippet: Optional[str] = None  # first part of the post the notification is about
     message: str
     read: bool = False
     createdAt: str
